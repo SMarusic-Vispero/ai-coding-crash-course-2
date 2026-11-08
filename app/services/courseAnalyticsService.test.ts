@@ -388,9 +388,9 @@ describe("getCourseAnalytics — trends", () => {
     expect(trends.today).toBe("2026-06-15");
     expect(trends.start).toBe(base.course.createdAt.slice(0, 10));
     expect(trends.daily).toEqual([
-      { date: "2026-06-10", enrollments: 2, completions: 0, lessonsCompleted: 0 },
-      { date: "2026-06-11", enrollments: 1, completions: 0, lessonsCompleted: 1 },
-      { date: "2026-06-12", enrollments: 0, completions: 2, lessonsCompleted: 1 },
+      { date: "2026-06-10", enrollments: 2, completions: 0, lessonsCompleted: 0, revenue: 0 },
+      { date: "2026-06-11", enrollments: 1, completions: 0, lessonsCompleted: 1, revenue: 0 },
+      { date: "2026-06-12", enrollments: 0, completions: 2, lessonsCompleted: 1, revenue: 0 },
     ]);
   });
 
@@ -403,7 +403,7 @@ describe("getCourseAnalytics — trends", () => {
     const { trends } = getCourseAnalytics(base.course.id, base.instructor.id, NOW);
 
     expect(trends.daily).toEqual([
-      { date: "2026-06-13", enrollments: 1, completions: 0, lessonsCompleted: 0 },
+      { date: "2026-06-13", enrollments: 1, completions: 0, lessonsCompleted: 0, revenue: 0 },
     ]);
   });
 
@@ -566,5 +566,146 @@ describe("getCourseAnalytics — feedback", () => {
     expect(feedback.ratingCount).toBe(0);
     expect(feedback.distribution.every((d) => d.count === 0)).toBe(true);
     expect(feedback.commentsPerLesson).toEqual([]);
+  });
+});
+
+// ─── Sales ───
+
+describe("getCourseAnalytics — sales", () => {
+  let couponCounter = 0;
+
+  function buy(
+    userId: number,
+    amountPaid: number,
+    country: string | null = "US",
+    createdAt = "2026-06-10T10:00:00.000Z"
+  ) {
+    return testDb
+      .insert(schema.purchases)
+      .values({ userId, courseId: base.course.id, amountPaid, country, createdAt })
+      .returning()
+      .get();
+  }
+
+  /** A team purchase: one purchase row plus one coupon per seat. */
+  function buyTeam(
+    userId: number,
+    amountPaid: number,
+    seats: number,
+    redeemedBy: number[] = [],
+    country: string | null = "US"
+  ) {
+    const purchase = buy(userId, amountPaid, country);
+    const team = testDb.insert(schema.teams).values({}).returning().get();
+    for (let i = 0; i < seats; i++) {
+      couponCounter++;
+      const redeemer = redeemedBy[i] ?? null;
+      testDb
+        .insert(schema.coupons)
+        .values({
+          teamId: team.id,
+          courseId: base.course.id,
+          code: `CODE-${couponCounter}`,
+          purchaseId: purchase.id,
+          redeemedByUserId: redeemer,
+          redeemedAt: redeemer === null ? null : "2026-06-11T10:00:00.000Z",
+        })
+        .run();
+    }
+    return purchase;
+  }
+
+  it("totals revenue, purchases and average price per seat across solo and team purchases", () => {
+    buy(base.user.id, 5000);
+    buy(createStudent().id, 3000);
+    buyTeam(createStudent().id, 16000, 4);
+
+    const { sales } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(sales.revenue).toBe(24000);
+    expect(sales.purchases).toBe(3);
+    expect(sales.seats).toBe(6);
+    expect(sales.averagePrice).toBe(4000);
+  });
+
+  it("counts team seats sold (coupons) and redeemed (coupons with a redeeming user)", () => {
+    const a = createStudent();
+    const b = createStudent();
+    buy(base.user.id, 5000);
+    buyTeam(createStudent().id, 12000, 3, [a.id]);
+    buyTeam(createStudent().id, 8000, 2, [b.id]);
+
+    const { sales } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(sales.teamSeatsSold).toBe(5);
+    expect(sales.teamSeatsRedeemed).toBe(2);
+  });
+
+  it("breaks revenue and purchase count down by buyer country, highest revenue first", () => {
+    buy(base.user.id, 2000, "IN");
+    buy(createStudent().id, 2500, "IN");
+    buy(createStudent().id, 5000, "US");
+    buyTeam(createStudent().id, 9000, 3, [], "DE");
+    buy(createStudent().id, 1000, null);
+
+    const { sales } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(sales.byCountry).toEqual([
+      { country: "DE", revenue: 9000, purchases: 1 },
+      { country: "US", revenue: 5000, purchases: 1 },
+      { country: "IN", revenue: 4500, purchases: 2 },
+      { country: null, revenue: 1000, purchases: 1 },
+    ]);
+  });
+
+  it("excludes the instructor's own purchases and their team seats", () => {
+    buy(base.instructor.id, 9900, "GB");
+    buyTeam(base.instructor.id, 20000, 5, [base.user.id]);
+    buy(base.user.id, 5000, "US");
+
+    const { sales } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(sales).toEqual({
+      revenue: 5000,
+      purchases: 1,
+      seats: 1,
+      averagePrice: 5000,
+      teamSeatsSold: 0,
+      teamSeatsRedeemed: 0,
+      byCountry: [{ country: "US", revenue: 5000, purchases: 1 }],
+    });
+  });
+
+  it("returns zeroes and no average for a course with no purchases", () => {
+    const { sales } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(sales).toEqual({
+      revenue: 0,
+      purchases: 0,
+      seats: 0,
+      averagePrice: null,
+      teamSeatsSold: 0,
+      teamSeatsRedeemed: 0,
+      byCountry: [],
+    });
+  });
+
+  it("adds revenue summed per UTC day to the trend series, excluding the instructor", () => {
+    buy(base.user.id, 5000, "US", "2026-06-10T00:00:00.000Z");
+    buy(createStudent().id, 3000, "US", "2026-06-10T23:59:59.999Z");
+    buyTeam(createStudent().id, 12000, 3);
+    buy(createStudent().id, 2000, "US", "2026-06-12T08:00:00.000Z");
+    buy(base.instructor.id, 9900, "US", "2026-06-11T08:00:00.000Z");
+
+    const { trends } = getCourseAnalytics(
+      base.course.id,
+      base.instructor.id,
+      new Date("2026-06-15T12:00:00.000Z")
+    );
+
+    expect(trends.daily).toEqual([
+      { date: "2026-06-10", enrollments: 0, completions: 0, lessonsCompleted: 0, revenue: 20000 },
+      { date: "2026-06-12", enrollments: 0, completions: 0, lessonsCompleted: 0, revenue: 2000 },
+    ]);
   });
 });

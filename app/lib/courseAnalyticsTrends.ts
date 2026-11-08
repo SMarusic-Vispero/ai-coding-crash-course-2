@@ -12,7 +12,12 @@ import type { AnalyticsRange } from "~/lib/analytics";
  * Series of the course's daily activity series, shared by the service (which
  * fills them) and the page (which charts them). Add a key to add a series.
  */
-export const TREND_KEYS = ["enrollments", "completions", "lessonsCompleted"] as const;
+export const TREND_KEYS = [
+  "enrollments",
+  "completions",
+  "lessonsCompleted",
+  "revenue",
+] as const;
 export type TrendKey = (typeof TREND_KEYS)[number];
 
 export type TrendGranularity = "day" | "week" | "month";

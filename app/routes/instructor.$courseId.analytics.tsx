@@ -12,6 +12,7 @@ import { TrendsSection } from "~/components/course-analytics/trends-section";
 import { QuizzesSection } from "~/components/course-analytics/quizzes-section";
 import { ProgressSection } from "~/components/course-analytics/progress-section";
 import { FeedbackSection } from "~/components/course-analytics/feedback-section";
+import { SalesSection } from "~/components/course-analytics/sales-section";
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const title = loaderData?.course?.title ?? "Course Analytics";
@@ -95,6 +96,7 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
       <QuizzesSection quizzes={analytics.quizzes} />
       <ProgressSection progress={analytics.progress} />
       <FeedbackSection feedback={analytics.feedback} />
+      <SalesSection sales={analytics.sales} isFree={course.price === 0} />
     </div>
   );
 }

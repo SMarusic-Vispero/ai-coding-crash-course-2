@@ -14,6 +14,7 @@ import {
   type TrendPoint,
 } from "~/lib/courseAnalyticsTrends";
 import type { CourseTrends } from "~/services/courseAnalyticsService";
+import { formatCents } from "~/lib/utils";
 import {
   ChartContainer,
   ChartTooltip,
@@ -47,6 +48,7 @@ const TREND_CHARTS: TrendChartSpec[] = [
   { key: "enrollments", title: "New enrollments", color: "var(--chart-1)" },
   { key: "completions", title: "Course completions", color: "var(--chart-2)" },
   { key: "lessonsCompleted", title: "Lessons completed", color: "var(--chart-3)" },
+  { key: "revenue", title: "Revenue", color: "var(--chart-4)", format: formatCents },
 ];
 
 const formatCount = (value: number) => value.toLocaleString();
@@ -107,7 +109,7 @@ export function TrendsSection({ trends }: { trends: CourseTrends }) {
       <SectionCard title="Trends">
         <SectionEmpty
           title="No activity yet"
-          body="Enrollments, completions and lesson progress appear here once students start the course."
+          body="Enrollments, completions, lesson progress and revenue appear here once students start the course."
         />
       </SectionCard>
     );
