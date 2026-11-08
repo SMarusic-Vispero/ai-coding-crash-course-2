@@ -7,10 +7,11 @@ import { getUserById } from "~/services/userService";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
-import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-react";
+import { AlertTriangle, BarChart3, BookOpen, GraduationCap, Plus, Users } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
 import { CourseStatus, UserRole } from "~/db/schema";
+import { hasCourseAnalytics } from "~/lib/courseAnalyticsAccess";
 
 export function meta() {
   return [
@@ -206,13 +207,21 @@ export default function InstructorDashboard({
                   </div>
                 </div>
               </CardContent>
-              <CardFooter>
-                <Link to={`/instructor/${course.id}`} className="w-full">
+              <CardFooter className="gap-2">
+                <Link to={`/instructor/${course.id}`} className="flex-1">
                   <Button className="w-full" variant="outline">
                     <BookOpen className="mr-2 size-4" />
                     Edit Course
                   </Button>
                 </Link>
+                {hasCourseAnalytics(course.status) && (
+                  <Link to={`/instructor/${course.id}/analytics`} className="flex-1">
+                    <Button className="w-full" variant="outline">
+                      <BarChart3 className="mr-2 size-4" />
+                      Analytics
+                    </Button>
+                  </Link>
+                )}
               </CardFooter>
             </Card>
           ))}
