@@ -334,3 +334,82 @@ describe("getCourseAnalytics — quizzes", () => {
     expect(quizzes.first.hardestQuestions).toEqual([]);
   });
 });
+
+// ─── Trends ───
+
+describe("getCourseAnalytics — trends", () => {
+  const NOW = new Date("2026-06-15T12:00:00.000Z");
+
+  function addLesson() {
+    const mod = testDb
+      .insert(schema.modules)
+      .values({ courseId: base.course.id, title: "Module", position: 1 })
+      .returning()
+      .get();
+    return testDb
+      .insert(schema.lessons)
+      .values({ moduleId: mod.id, title: "Lesson", position: 1 })
+      .returning()
+      .get();
+  }
+
+  function enrollAt(userId: number, enrolledAt: string, completedAt: string | null = null) {
+    testDb
+      .insert(schema.enrollments)
+      .values({ userId, courseId: base.course.id, enrolledAt, completedAt })
+      .run();
+  }
+
+  function trackLesson(
+    userId: number,
+    lessonId: number,
+    completedAt: string | null,
+    status = schema.LessonProgressStatus.Completed
+  ) {
+    testDb
+      .insert(schema.lessonProgress)
+      .values({ userId, lessonId, status, completedAt })
+      .run();
+  }
+
+  it("buckets enrollments, completions and lesson completions by UTC date", () => {
+    const lesson = addLesson();
+    const a = createStudent();
+    const b = createStudent();
+    enrollAt(a.id, "2026-06-10T00:00:00.000Z", "2026-06-12T23:59:59.999Z");
+    enrollAt(b.id, "2026-06-10T23:59:59.999Z");
+    enrollAt(base.user.id, "2026-06-11T00:00:00.000Z", "2026-06-12T01:00:00.000Z");
+    trackLesson(a.id, lesson.id, "2026-06-11T08:00:00.000Z");
+    trackLesson(b.id, lesson.id, "2026-06-12T08:00:00.000Z");
+    trackLesson(base.user.id, lesson.id, null, schema.LessonProgressStatus.InProgress);
+
+    const { trends } = getCourseAnalytics(base.course.id, base.instructor.id, NOW);
+
+    expect(trends.today).toBe("2026-06-15");
+    expect(trends.start).toBe(base.course.createdAt.slice(0, 10));
+    expect(trends.daily).toEqual([
+      { date: "2026-06-10", enrollments: 2, completions: 0, lessonsCompleted: 0 },
+      { date: "2026-06-11", enrollments: 1, completions: 0, lessonsCompleted: 1 },
+      { date: "2026-06-12", enrollments: 0, completions: 2, lessonsCompleted: 1 },
+    ]);
+  });
+
+  it("excludes the instructor's own enrollments and lesson completions", () => {
+    const lesson = addLesson();
+    enrollAt(base.instructor.id, "2026-06-10T10:00:00.000Z", "2026-06-11T10:00:00.000Z");
+    trackLesson(base.instructor.id, lesson.id, "2026-06-11T10:00:00.000Z");
+    enrollAt(base.user.id, "2026-06-13T10:00:00.000Z");
+
+    const { trends } = getCourseAnalytics(base.course.id, base.instructor.id, NOW);
+
+    expect(trends.daily).toEqual([
+      { date: "2026-06-13", enrollments: 1, completions: 0, lessonsCompleted: 0 },
+    ]);
+  });
+
+  it("returns an empty daily series for a course with no activity", () => {
+    const { trends } = getCourseAnalytics(base.course.id, base.instructor.id, NOW);
+
+    expect(trends.daily).toEqual([]);
+  });
+});
