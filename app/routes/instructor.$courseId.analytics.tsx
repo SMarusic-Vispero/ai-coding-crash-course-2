@@ -10,6 +10,8 @@ import { AlertTriangle, ArrowLeft } from "lucide-react";
 import { StudentsSection } from "~/components/course-analytics/students-section";
 import { TrendsSection } from "~/components/course-analytics/trends-section";
 import { QuizzesSection } from "~/components/course-analytics/quizzes-section";
+import { ProgressSection } from "~/components/course-analytics/progress-section";
+import { FeedbackSection } from "~/components/course-analytics/feedback-section";
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const title = loaderData?.course?.title ?? "Course Analytics";
@@ -88,9 +90,11 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
       </div>
 
       {/* One component per section; later sections slot in below. */}
-      <StudentsSection students={analytics.students} />
+      <StudentsSection students={analytics.students} feedback={analytics.feedback} />
       <TrendsSection trends={analytics.trends} />
       <QuizzesSection quizzes={analytics.quizzes} />
+      <ProgressSection progress={analytics.progress} />
+      <FeedbackSection feedback={analytics.feedback} />
     </div>
   );
 }

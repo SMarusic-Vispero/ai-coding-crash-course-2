@@ -413,3 +413,158 @@ describe("getCourseAnalytics — trends", () => {
     expect(trends.daily).toEqual([]);
   });
 });
+
+// ─── Progress ───
+
+/** Creates a module at `position` holding lessons with the given titles. */
+function createModule(courseId: number, title: string, position: number, lessonTitles: string[]) {
+  const mod = testDb
+    .insert(schema.modules)
+    .values({ courseId, title, position })
+    .returning()
+    .get();
+  return lessonTitles.map((lessonTitle, i) =>
+    testDb
+      .insert(schema.lessons)
+      .values({ moduleId: mod.id, title: lessonTitle, position: i + 1 })
+      .returning()
+      .get()
+  );
+}
+
+function completeLesson(
+  userId: number,
+  lessonId: number,
+  status = schema.LessonProgressStatus.Completed
+) {
+  testDb
+    .insert(schema.lessonProgress)
+    .values({
+      userId,
+      lessonId,
+      status,
+      completedAt:
+        status === schema.LessonProgressStatus.Completed ? "2026-06-10T10:00:00.000Z" : null,
+    })
+    .run();
+}
+
+describe("getCourseAnalytics — progress", () => {
+  it("counts completions per lesson in course order, so a skipped lesson shows a dip", () => {
+    // Module Two is created first to prove ordering follows position, not id.
+    const [wrapUp] = createModule(base.course.id, "Module Two", 2, ["Wrap-up"]);
+    const [intro, setup, deepDive] = createModule(base.course.id, "Module One", 1, [
+      "Intro",
+      "Setup",
+      "Deep dive",
+    ]);
+    const a = createStudent();
+    const b = createStudent();
+    completeLesson(a.id, intro.id);
+    completeLesson(b.id, intro.id);
+    completeLesson(a.id, deepDive.id);
+    completeLesson(b.id, deepDive.id);
+    completeLesson(a.id, wrapUp.id);
+    completeLesson(b.id, setup.id, schema.LessonProgressStatus.InProgress);
+
+    const { progress } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(progress.lessons).toEqual([
+      { lessonId: intro.id, lessonTitle: "Intro", moduleTitle: "Module One", completed: 2 },
+      { lessonId: setup.id, lessonTitle: "Setup", moduleTitle: "Module One", completed: 0 },
+      { lessonId: deepDive.id, lessonTitle: "Deep dive", moduleTitle: "Module One", completed: 2 },
+      { lessonId: wrapUp.id, lessonTitle: "Wrap-up", moduleTitle: "Module Two", completed: 1 },
+    ]);
+  });
+
+  it("excludes the instructor's own lesson completions", () => {
+    const [lesson] = createModule(base.course.id, "Module", 1, ["Only lesson"]);
+    completeLesson(base.instructor.id, lesson.id);
+    completeLesson(base.user.id, lesson.id);
+
+    const { progress } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(progress.lessons.map((l) => l.completed)).toEqual([1]);
+  });
+
+  it("returns no lessons for a course without any", () => {
+    const { progress } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(progress.lessons).toEqual([]);
+  });
+});
+
+// ─── Feedback ───
+
+function rate(userId: number, rating: number) {
+  testDb
+    .insert(schema.courseRatings)
+    .values({ userId, courseId: base.course.id, rating })
+    .run();
+}
+
+function comment(userId: number, lessonId: number, deletedAt: string | null = null) {
+  testDb
+    .insert(schema.comments)
+    .values({ userId, lessonId, body: "A comment", deletedAt })
+    .run();
+}
+
+describe("getCourseAnalytics — feedback", () => {
+  it("reports average rating, count and the 1–5 star distribution", () => {
+    rate(base.user.id, 5);
+    rate(createStudent().id, 5);
+    rate(createStudent().id, 4);
+    rate(createStudent().id, 2);
+
+    const { feedback } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(feedback.averageRating).toBe(4);
+    expect(feedback.ratingCount).toBe(4);
+    expect(feedback.distribution).toEqual([
+      { stars: 1, count: 0 },
+      { stars: 2, count: 1 },
+      { stars: 3, count: 0 },
+      { stars: 4, count: 1 },
+      { stars: 5, count: 2 },
+    ]);
+  });
+
+  it("counts comments per lesson in course order, excluding soft-deleted ones", () => {
+    const [first, second] = createModule(base.course.id, "Module", 1, ["First", "Second"]);
+    comment(base.user.id, first.id);
+    comment(base.user.id, first.id, "2026-06-12T10:00:00.000Z");
+    comment(createStudent().id, second.id);
+    comment(createStudent().id, second.id);
+
+    const { feedback } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(feedback.commentsPerLesson).toEqual([
+      { lessonId: first.id, lessonTitle: "First", moduleTitle: "Module", comments: 1 },
+      { lessonId: second.id, lessonTitle: "Second", moduleTitle: "Module", comments: 2 },
+    ]);
+  });
+
+  it("excludes the instructor's own rating and comments", () => {
+    const [lesson] = createModule(base.course.id, "Module", 1, ["Lesson"]);
+    rate(base.instructor.id, 1);
+    rate(base.user.id, 5);
+    comment(base.instructor.id, lesson.id);
+
+    const { feedback } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(feedback.averageRating).toBe(5);
+    expect(feedback.ratingCount).toBe(1);
+    expect(feedback.distribution.find((d) => d.stars === 1)?.count).toBe(0);
+    expect(feedback.commentsPerLesson.map((l) => l.comments)).toEqual([0]);
+  });
+
+  it("returns empty figures for a course without ratings or comments", () => {
+    const { feedback } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(feedback.averageRating).toBeNull();
+    expect(feedback.ratingCount).toBe(0);
+    expect(feedback.distribution.every((d) => d.count === 0)).toBe(true);
+    expect(feedback.commentsPerLesson).toEqual([]);
+  });
+});

@@ -1,6 +1,8 @@
-import { and, asc, eq, isNotNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
+  comments,
+  courseRatings,
   courses,
   enrollments,
   lessonProgress,
@@ -314,6 +316,122 @@ function getTrends(courseId: number, instructorId: number, now: Date): CourseTre
   };
 }
 
+// ─── Progress ───
+
+export interface LessonCompletion {
+  lessonId: number;
+  lessonTitle: string;
+  moduleTitle: string;
+  /** Students who completed this lesson (not "reached at least this lesson"). */
+  completed: number;
+}
+
+export interface CourseProgress {
+  /** Every lesson in course order (module position, then lesson position). */
+  lessons: LessonCompletion[];
+}
+
+function getProgress(courseId: number, instructorId: number): CourseProgress {
+  const rows = db
+    .select({
+      lessonId: lessons.id,
+      lessonTitle: lessons.title,
+      moduleTitle: modules.title,
+      completed: sql<number>`count(${lessonProgress.id})`,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .leftJoin(
+      lessonProgress,
+      and(
+        eq(lessonProgress.lessonId, lessons.id),
+        eq(lessonProgress.status, LessonProgressStatus.Completed),
+        ne(lessonProgress.userId, instructorId)
+      )
+    )
+    .where(eq(modules.courseId, courseId))
+    .groupBy(lessons.id)
+    .orderBy(asc(modules.position), asc(lessons.position), asc(lessons.id))
+    .all();
+
+  return { lessons: rows };
+}
+
+// ─── Feedback ───
+
+export interface StarCount {
+  /** 1..5 */
+  stars: number;
+  count: number;
+}
+
+export interface CourseFeedback {
+  /** Mean of all ratings, 1..5; null when nobody has rated. */
+  averageRating: number | null;
+  ratingCount: number;
+  /** One entry per star value, 1 to 5, including zero counts. */
+  distribution: StarCount[];
+  /** Every lesson in course order with its comment count (soft-deleted excluded). */
+  commentsPerLesson: LessonComments[];
+}
+
+export interface LessonComments {
+  lessonId: number;
+  lessonTitle: string;
+  moduleTitle: string;
+  comments: number;
+}
+
+const STAR_VALUES = [1, 2, 3, 4, 5];
+
+function getCommentsPerLesson(courseId: number, instructorId: number): LessonComments[] {
+  return db
+    .select({
+      lessonId: lessons.id,
+      lessonTitle: lessons.title,
+      moduleTitle: modules.title,
+      comments: sql<number>`count(${comments.id})`,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .leftJoin(
+      comments,
+      and(
+        eq(comments.lessonId, lessons.id),
+        isNull(comments.deletedAt),
+        ne(comments.userId, instructorId)
+      )
+    )
+    .where(eq(modules.courseId, courseId))
+    .groupBy(lessons.id)
+    .orderBy(asc(modules.position), asc(lessons.position), asc(lessons.id))
+    .all();
+}
+
+function getFeedback(courseId: number, instructorId: number): CourseFeedback {
+  const rows = db
+    .select({ stars: courseRatings.rating, count: sql<number>`count(*)` })
+    .from(courseRatings)
+    .where(and(eq(courseRatings.courseId, courseId), ne(courseRatings.userId, instructorId)))
+    .groupBy(courseRatings.rating)
+    .all();
+
+  const countByStars = new Map(rows.map((row) => [row.stars, row.count]));
+  const distribution = STAR_VALUES.map((stars) => ({
+    stars,
+    count: countByStars.get(stars) ?? 0,
+  }));
+  const ratingCount = rows.reduce((sum, row) => sum + row.count, 0);
+  const starTotal = rows.reduce((sum, row) => sum + row.stars * row.count, 0);
+
+  return {
+    averageRating: ratingCount === 0 ? null : starTotal / ratingCount,
+    ratingCount,
+    distribution,
+    commentsPerLesson: getCommentsPerLesson(courseId, instructorId),
+  };
+}
+
 // ─── Entry point ───
 
 export function getCourseAnalytics(
@@ -325,6 +443,8 @@ export function getCourseAnalytics(
     students: getStudentTotals(courseId, instructorId),
     quizzes: getQuizAnalytics(courseId, instructorId),
     trends: getTrends(courseId, instructorId, now),
+    progress: getProgress(courseId, instructorId),
+    feedback: getFeedback(courseId, instructorId),
   };
 }
 
