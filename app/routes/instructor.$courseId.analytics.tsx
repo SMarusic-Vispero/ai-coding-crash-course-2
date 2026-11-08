@@ -10,6 +10,7 @@ import { AlertTriangle, ArrowLeft } from "lucide-react";
 import { StudentsSection } from "~/components/course-analytics/students-section";
 import { TrendsSection } from "~/components/course-analytics/trends-section";
 import { QuizzesSection } from "~/components/course-analytics/quizzes-section";
+import { SalesSection } from "~/components/course-analytics/sales-section";
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const title = loaderData?.course?.title ?? "Course Analytics";
@@ -91,6 +92,7 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
       <StudentsSection students={analytics.students} />
       <TrendsSection trends={analytics.trends} />
       <QuizzesSection quizzes={analytics.quizzes} />
+      <SalesSection sales={analytics.sales} isFree={course.price === 0} />
     </div>
   );
 }

@@ -1,8 +1,10 @@
-import { and, asc, eq, isNotNull, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, ne, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
+  coupons,
   courses,
   enrollments,
+  purchases,
   lessonProgress,
   lessons,
   LessonProgressStatus,
@@ -278,6 +280,17 @@ function getLessonsCompletedPerDay(courseId: number, instructorId: number): DayC
     .all();
 }
 
+/** Amount paid (cents) summed per UTC purchase day. */
+function getRevenuePerDay(courseId: number, instructorId: number): DayCount[] {
+  const day = sql<string>`substr(${purchases.createdAt}, 1, 10)`;
+  return db
+    .select({ day, count: sql<number>`sum(${purchases.amountPaid})` })
+    .from(purchases)
+    .where(and(eq(purchases.courseId, courseId), ne(purchases.userId, instructorId)))
+    .groupBy(day)
+    .all();
+}
+
 /** Merges per-key day totals into one row per active day, sorted by date. */
 function mergeDaily(perKey: Record<TrendKey, DayCount[]>): DailyActivity[] {
   const byDay = new Map<string, DailyActivity>();
@@ -310,7 +323,88 @@ function getTrends(courseId: number, instructorId: number, now: Date): CourseTre
       enrollments: getEnrollmentsPerDay(courseId, instructorId),
       completions: getCompletionsPerDay(courseId, instructorId),
       lessonsCompleted: getLessonsCompletedPerDay(courseId, instructorId),
+      revenue: getRevenuePerDay(courseId, instructorId),
     }),
+  };
+}
+
+// ─── Sales ───
+
+export interface SalesAnalytics {
+  /** All-time revenue in cents, excluding the instructor's purchases. */
+  revenue: number;
+  /** Purchase rows; a team purchase counts once. */
+  purchases: number;
+  /** Seats paid for: one per solo purchase, one per coupon for a team purchase. */
+  seats: number;
+  /** revenue ÷ seats in cents; null with no purchases. */
+  averagePrice: number | null;
+  /** Coupons created by team purchases. */
+  teamSeatsSold: number;
+  /** Of those, coupons with a redeeming user. */
+  teamSeatsRedeemed: number;
+  /** Revenue and purchases per buyer country, highest revenue first. */
+  byCountry: CountrySales[];
+}
+
+export interface CountrySales {
+  /** ISO 3166-1 alpha-2 code; null when the purchase recorded no country. */
+  country: string | null;
+  revenue: number;
+  purchases: number;
+}
+
+function getSalesByCountry(courseId: number, instructorId: number): CountrySales[] {
+  const revenue = sql<number>`sum(${purchases.amountPaid})`;
+  return db
+    .select({
+      country: purchases.country,
+      revenue,
+      purchases: sql<number>`count(*)`,
+    })
+    .from(purchases)
+    .where(and(eq(purchases.courseId, courseId), ne(purchases.userId, instructorId)))
+    .groupBy(purchases.country)
+    .orderBy(desc(revenue), asc(purchases.country))
+    .all();
+}
+
+function getSales(courseId: number, instructorId: number): SalesAnalytics {
+  const couponCounts = db.$with("purchase_coupons").as(
+    db
+      .select({
+        purchaseId: sql<number>`${coupons.purchaseId}`.as("coupon_purchase_id"),
+        seats: sql<number>`count(*)`.as("coupon_seats"),
+        redeemed: sql<number>`count(${coupons.redeemedByUserId})`.as("coupon_redeemed"),
+      })
+      .from(coupons)
+      .groupBy(coupons.purchaseId)
+  );
+
+  const row = db
+    .with(couponCounts)
+    .select({
+      revenue: sql<number>`coalesce(sum(${purchases.amountPaid}), 0)`,
+      purchases: sql<number>`count(*)`,
+      seats: sql<number>`coalesce(sum(coalesce(${couponCounts.seats}, 1)), 0)`,
+      teamSeatsSold: sql<number>`coalesce(sum(${couponCounts.seats}), 0)`,
+      teamSeatsRedeemed: sql<number>`coalesce(sum(${couponCounts.redeemed}), 0)`,
+    })
+    .from(purchases)
+    .leftJoin(couponCounts, eq(couponCounts.purchaseId, purchases.id))
+    .where(and(eq(purchases.courseId, courseId), ne(purchases.userId, instructorId)))
+    .get();
+
+  const revenue = row?.revenue ?? 0;
+  const seats = row?.seats ?? 0;
+  return {
+    revenue,
+    purchases: row?.purchases ?? 0,
+    seats,
+    averagePrice: seats === 0 ? null : revenue / seats,
+    teamSeatsSold: row?.teamSeatsSold ?? 0,
+    teamSeatsRedeemed: row?.teamSeatsRedeemed ?? 0,
+    byCountry: getSalesByCountry(courseId, instructorId),
   };
 }
 
@@ -325,6 +419,7 @@ export function getCourseAnalytics(
     students: getStudentTotals(courseId, instructorId),
     quizzes: getQuizAnalytics(courseId, instructorId),
     trends: getTrends(courseId, instructorId, now),
+    sales: getSales(courseId, instructorId),
   };
 }
 
