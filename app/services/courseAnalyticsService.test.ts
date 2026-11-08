@@ -113,3 +113,224 @@ describe("getCourseAnalytics — students", () => {
     });
   });
 });
+
+// ─── Quizzes ───
+
+let quizLessonCounter = 0;
+
+/**
+ * Creates a lesson with a quiz in the given course. Each question gets one
+ * correct and one wrong option.
+ */
+function createQuiz(courseId: number, title: string, questionTexts: string[]) {
+  quizLessonCounter++;
+  const mod = testDb
+    .insert(schema.modules)
+    .values({ courseId, title: `Module ${quizLessonCounter}`, position: quizLessonCounter })
+    .returning()
+    .get();
+  const lesson = testDb
+    .insert(schema.lessons)
+    .values({ moduleId: mod.id, title: `Lesson ${quizLessonCounter}`, position: 1 })
+    .returning()
+    .get();
+  const quiz = testDb
+    .insert(schema.quizzes)
+    .values({ lessonId: lesson.id, title, passingScore: 0.7 })
+    .returning()
+    .get();
+  const questions = questionTexts.map((questionText, i) => {
+    const question = testDb
+      .insert(schema.quizQuestions)
+      .values({
+        quizId: quiz.id,
+        questionText,
+        questionType: schema.QuestionType.MultipleChoice,
+        position: i + 1,
+      })
+      .returning()
+      .get();
+    const correct = testDb
+      .insert(schema.quizOptions)
+      .values({ questionId: question.id, optionText: "Right", isCorrect: true })
+      .returning()
+      .get();
+    const wrong = testDb
+      .insert(schema.quizOptions)
+      .values({ questionId: question.id, optionText: "Wrong", isCorrect: false })
+      .returning()
+      .get();
+    return { id: question.id, correctOptionId: correct.id, wrongOptionId: wrong.id };
+  });
+  return { quiz, lesson, questions };
+}
+
+/**
+ * Records an attempt. `answers[i]` says whether question i was answered
+ * correctly; score is the fraction correct and passed follows the quiz's 0.7
+ * passing score.
+ */
+function attemptQuiz(
+  userId: number,
+  quiz: ReturnType<typeof createQuiz>,
+  attemptedAt: string,
+  answers: boolean[]
+) {
+  const score = answers.filter(Boolean).length / answers.length;
+  const attempt = testDb
+    .insert(schema.quizAttempts)
+    .values({ userId, quizId: quiz.quiz.id, score, passed: score >= 0.7, attemptedAt })
+    .returning()
+    .get();
+  answers.forEach((isCorrect, i) => {
+    const question = quiz.questions[i];
+    testDb
+      .insert(schema.quizAnswers)
+      .values({
+        attemptId: attempt.id,
+        questionId: question.id,
+        selectedOptionId: isCorrect ? question.correctOptionId : question.wrongOptionId,
+      })
+      .run();
+  });
+  return attempt;
+}
+
+describe("getCourseAnalytics — quizzes", () => {
+  it("uses the earliest attempt for first and the highest-scoring for best", () => {
+    const quiz = createQuiz(base.course.id, "Basics", ["Q1", "Q2"]);
+    // Fails first, then passes.
+    attemptQuiz(base.user.id, quiz, "2026-06-01T10:00:00.000Z", [false, true]);
+    attemptQuiz(base.user.id, quiz, "2026-06-02T10:00:00.000Z", [true, true]);
+
+    const { quizzes } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(quizzes.first.passRate).toBe(0);
+    expect(quizzes.best.passRate).toBe(1);
+  });
+
+  it("reports pass rate and average score per quiz in course order", () => {
+    const basics = createQuiz(base.course.id, "Basics", ["Q1", "Q2"]);
+    const advanced = createQuiz(base.course.id, "Advanced", ["Q1", "Q2"]);
+    const other = createStudent();
+    // Student 1 fails then passes Basics.
+    attemptQuiz(base.user.id, basics, "2026-06-01T10:00:00.000Z", [false, false]);
+    attemptQuiz(base.user.id, basics, "2026-06-02T10:00:00.000Z", [true, true]);
+    // Student 2 scores half on Basics, retries and does no better.
+    attemptQuiz(other.id, basics, "2026-06-01T11:00:00.000Z", [true, false]);
+    attemptQuiz(other.id, basics, "2026-06-03T11:00:00.000Z", [false, false]);
+
+    const { quizzes } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(quizzes.first.quizzes).toEqual([
+      {
+        quizId: basics.quiz.id,
+        title: "Basics",
+        lessonTitle: basics.lesson.title,
+        attempts: 2,
+        passRate: 0,
+        averageScore: 0.25,
+      },
+      {
+        quizId: advanced.quiz.id,
+        title: "Advanced",
+        lessonTitle: advanced.lesson.title,
+        attempts: 0,
+        passRate: null,
+        averageScore: null,
+      },
+    ]);
+    expect(quizzes.best.quizzes[0]).toMatchObject({
+      attempts: 2,
+      passRate: 0.5,
+      averageScore: 0.75,
+    });
+    expect(quizzes.first.passRate).toBe(0);
+    expect(quizzes.best.passRate).toBe(0.5);
+  });
+
+  it("ranks the five hardest questions by percentage correct, worst first", () => {
+    const quiz = createQuiz(base.course.id, "Basics", ["A", "B", "C", "D", "E", "F"]);
+    const s2 = createStudent();
+    // First attempts: A 0/2, B 1/2, C 2/2, D 1/2, E 0/2, F 2/2.
+    attemptQuiz(base.user.id, quiz, "2026-06-01T10:00:00.000Z", [false, true, true, false, false, true]);
+    attemptQuiz(s2.id, quiz, "2026-06-01T11:00:00.000Z", [false, false, true, true, false, true]);
+    // Student 1 retries and gets everything but E right (best attempt).
+    attemptQuiz(base.user.id, quiz, "2026-06-02T10:00:00.000Z", [true, true, true, true, false, true]);
+
+    const { quizzes } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    const summarise = (rows: typeof quizzes.first.hardestQuestions) =>
+      rows.map((q) => [q.questionText, q.answers, q.correctRate]);
+
+    // Ties broken by course order (question position).
+    expect(summarise(quizzes.first.hardestQuestions)).toEqual([
+      ["A", 2, 0],
+      ["E", 2, 0],
+      ["B", 2, 0.5],
+      ["D", 2, 0.5],
+      ["C", 2, 1],
+    ]);
+    expect(summarise(quizzes.best.hardestQuestions)).toEqual([
+      ["E", 2, 0],
+      ["A", 2, 0.5],
+      ["B", 2, 0.5],
+      ["C", 2, 1],
+      ["D", 2, 1],
+    ]);
+    expect(quizzes.first.hardestQuestions[0]).toMatchObject({
+      questionId: quiz.questions[0].id,
+      quizTitle: "Basics",
+    });
+  });
+
+  it("excludes the instructor's own attempts and other courses' quizzes", () => {
+    const quiz = createQuiz(base.course.id, "Basics", ["Q1", "Q2"]);
+    const other = testDb
+      .insert(schema.courses)
+      .values({
+        title: "Other Course",
+        slug: "other-course-quizzes",
+        description: "Another course",
+        salesCopy: "Sales copy",
+        instructorId: base.instructor.id,
+        categoryId: base.category.id,
+        status: schema.CourseStatus.Published,
+      })
+      .returning()
+      .get();
+    const otherQuiz = createQuiz(other.id, "Elsewhere", ["Q1"]);
+    attemptQuiz(base.instructor.id, quiz, "2026-06-01T09:00:00.000Z", [true, true]);
+    attemptQuiz(base.user.id, quiz, "2026-06-01T10:00:00.000Z", [false, false]);
+    attemptQuiz(base.user.id, otherQuiz, "2026-06-01T10:00:00.000Z", [true]);
+
+    const { quizzes } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    for (const mode of [quizzes.first, quizzes.best]) {
+      expect(mode.passRate).toBe(0);
+      expect(mode.quizzes).toHaveLength(1);
+      expect(mode.quizzes[0]).toMatchObject({ attempts: 1, averageScore: 0 });
+      expect(mode.hardestQuestions.map((q) => [q.answers, q.correctRate])).toEqual([
+        [1, 0],
+        [1, 0],
+      ]);
+    }
+  });
+
+  it("returns empty figures for a course without quizzes", () => {
+    const { quizzes } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    const empty = { passRate: null, quizzes: [], hardestQuestions: [] };
+    expect(quizzes).toEqual({ first: empty, best: empty });
+  });
+
+  it("lists quizzes but no hardest questions when nobody has attempted", () => {
+    createQuiz(base.course.id, "Basics", ["Q1"]);
+
+    const { quizzes } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(quizzes.first.passRate).toBeNull();
+    expect(quizzes.first.quizzes).toHaveLength(1);
+    expect(quizzes.first.hardestQuestions).toEqual([]);
+  });
+});

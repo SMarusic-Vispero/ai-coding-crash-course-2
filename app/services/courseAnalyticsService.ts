@@ -1,6 +1,15 @@
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, asc, eq, ne, sql } from "drizzle-orm";
 import { db } from "~/db";
 import { enrollments } from "~/db/schema";
+import {
+  lessons,
+  modules,
+  quizAnswers,
+  quizAttempts,
+  quizOptions,
+  quizQuestions,
+  quizzes,
+} from "~/db/schema";
 
 // ─── Course Analytics Service ───
 // Per-course analytics for the course's own instructor
@@ -42,11 +51,167 @@ function getStudentTotals(courseId: number, instructorId: number): StudentTotals
   };
 }
 
+// ─── Quizzes ───
+
+/** Which attempt stands for a student on a quiz. */
+export type QuizAttemptMode = "first" | "best";
+
+/** Every quiz figure for one attempt mode. */
+export interface QuizModeFigures {
+  /** Passed ÷ selected attempts across all quizzes, 0..1; null with no attempts. */
+  passRate: number | null;
+  /** Every quiz in the course, in course order. */
+  quizzes: QuizFigures[];
+  /** Up to five answered questions with the lowest share correct, worst first. */
+  hardestQuestions: HardQuestion[];
+}
+
+export interface HardQuestion {
+  questionId: number;
+  questionText: string;
+  quizTitle: string;
+  /** Answers to this question across the selected attempts. */
+  answers: number;
+  /** Share of those answers whose selected option is correct, 0..1. */
+  correctRate: number;
+}
+
+const HARDEST_QUESTION_COUNT = 5;
+
+export interface QuizFigures {
+  quizId: number;
+  title: string;
+  lessonTitle: string;
+  /** Students with at least one attempt (one selected attempt each). */
+  attempts: number;
+  /** 0..1; null when nobody has attempted the quiz. */
+  passRate: number | null;
+  /** Mean score of the selected attempts, 0..1; null with no attempts. */
+  averageScore: number | null;
+}
+
+export interface QuizAnalytics {
+  first: QuizModeFigures;
+  best: QuizModeFigures;
+}
+
+/**
+ * One attempt per student per quiz in the course, excluding the instructor:
+ * the earliest for "first", the highest-scoring for "best" (a pass wins a
+ * tie on score, then the earlier attempt).
+ */
+function selectedAttempts(courseId: number, instructorId: number, mode: QuizAttemptMode) {
+  const order =
+    mode === "first"
+      ? sql`${quizAttempts.attemptedAt} asc, ${quizAttempts.id} asc`
+      : sql`${quizAttempts.score} desc, ${quizAttempts.passed} desc, ${quizAttempts.attemptedAt} asc, ${quizAttempts.id} asc`;
+
+  return db.$with("selected_attempt").as(
+    db
+      .select({
+        attemptId: sql<number>`${quizAttempts.id}`.as("selected_attempt_id"),
+        quizId: sql<number>`${quizAttempts.quizId}`.as("selected_quiz_id"),
+        score: sql<number>`${quizAttempts.score}`.as("selected_score"),
+        passed: sql<number>`${quizAttempts.passed}`.as("selected_passed"),
+        rank: sql<number>`row_number() over (partition by ${quizAttempts.userId}, ${quizAttempts.quizId} order by ${order})`.as(
+          "selected_rank"
+        ),
+      })
+      .from(quizAttempts)
+      .innerJoin(quizzes, eq(quizAttempts.quizId, quizzes.id))
+      .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
+      .innerJoin(modules, eq(lessons.moduleId, modules.id))
+      .where(and(eq(modules.courseId, courseId), ne(quizAttempts.userId, instructorId)))
+  );
+}
+
+function getQuizModeFigures(
+  courseId: number,
+  instructorId: number,
+  mode: QuizAttemptMode
+): QuizModeFigures {
+  const selected = selectedAttempts(courseId, instructorId, mode);
+
+  const rows = db
+    .with(selected)
+    .select({
+      quizId: quizzes.id,
+      title: quizzes.title,
+      lessonTitle: lessons.title,
+      attempts: sql<number>`count(${selected.attemptId})`,
+      passed: sql<number>`coalesce(sum(${selected.passed}), 0)`,
+      scoreSum: sql<number>`coalesce(sum(${selected.score}), 0)`,
+    })
+    .from(quizzes)
+    .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .leftJoin(selected, and(eq(selected.quizId, quizzes.id), eq(selected.rank, 1)))
+    .where(eq(modules.courseId, courseId))
+    .groupBy(quizzes.id)
+    .orderBy(asc(modules.position), asc(lessons.position), asc(lessons.id), asc(quizzes.id))
+    .all();
+
+  const correctRate = sql<number>`cast(sum(${quizOptions.isCorrect}) as real) / count(*)`;
+  const hardestQuestions = db
+    .with(selected)
+    .select({
+      questionId: quizQuestions.id,
+      questionText: quizQuestions.questionText,
+      quizTitle: quizzes.title,
+      answers: sql<number>`count(*)`,
+      correctRate,
+    })
+    .from(selected)
+    .innerJoin(quizAnswers, eq(quizAnswers.attemptId, selected.attemptId))
+    .innerJoin(quizOptions, eq(quizAnswers.selectedOptionId, quizOptions.id))
+    .innerJoin(quizQuestions, eq(quizAnswers.questionId, quizQuestions.id))
+    .innerJoin(quizzes, eq(quizQuestions.quizId, quizzes.id))
+    .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(selected.rank, 1))
+    .groupBy(quizQuestions.id)
+    .orderBy(
+      asc(correctRate),
+      asc(modules.position),
+      asc(lessons.position),
+      asc(lessons.id),
+      asc(quizzes.id),
+      asc(quizQuestions.position),
+      asc(quizQuestions.id)
+    )
+    .limit(HARDEST_QUESTION_COUNT)
+    .all();
+
+  const attempts = rows.reduce((sum, row) => sum + row.attempts, 0);
+  const passed = rows.reduce((sum, row) => sum + row.passed, 0);
+
+  return {
+    passRate: attempts === 0 ? null : passed / attempts,
+    quizzes: rows.map((row) => ({
+      quizId: row.quizId,
+      title: row.title,
+      lessonTitle: row.lessonTitle,
+      attempts: row.attempts,
+      passRate: row.attempts === 0 ? null : row.passed / row.attempts,
+      averageScore: row.attempts === 0 ? null : row.scoreSum / row.attempts,
+    })),
+    hardestQuestions,
+  };
+}
+
+function getQuizAnalytics(courseId: number, instructorId: number): QuizAnalytics {
+  return {
+    first: getQuizModeFigures(courseId, instructorId, "first"),
+    best: getQuizModeFigures(courseId, instructorId, "best"),
+  };
+}
+
 // ─── Entry point ───
 
 export function getCourseAnalytics(courseId: number, instructorId: number) {
   return {
     students: getStudentTotals(courseId, instructorId),
+    quizzes: getQuizAnalytics(courseId, instructorId),
   };
 }
 
