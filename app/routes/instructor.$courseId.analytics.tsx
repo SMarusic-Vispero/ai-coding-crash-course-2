@@ -8,6 +8,7 @@ import { CourseStatus, UserRole } from "~/db/schema";
 import { Button } from "~/components/ui/button";
 import { AlertTriangle, ArrowLeft } from "lucide-react";
 import { StudentsSection } from "~/components/course-analytics/students-section";
+import { TrendsSection } from "~/components/course-analytics/trends-section";
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const title = loaderData?.course?.title ?? "Course Analytics";
@@ -87,6 +88,7 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
 
       {/* One component per section; later sections slot in below. */}
       <StudentsSection students={analytics.students} />
+      <TrendsSection trends={analytics.trends} />
     </div>
   );
 }
