@@ -17,11 +17,6 @@ const starConfig = {
   count: { label: "Ratings", color: "var(--chart-4)" },
 } satisfies ChartConfig;
 
-/** Formats an average rating to one decimal place, e.g. "4.3". */
-export function formatRating(average: number): string {
-  return average.toFixed(1);
-}
-
 export function FeedbackSection({ feedback }: { feedback: CourseFeedback }) {
   const hasComments = feedback.commentsPerLesson.some((lesson) => lesson.comments > 0);
 

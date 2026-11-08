@@ -641,6 +641,16 @@ describe("getCourseAnalytics — sales", () => {
     expect(sales.teamSeatsRedeemed).toBe(2);
   });
 
+  it("does not count team seats redeemed by the instructor as redeemed", () => {
+    const a = createStudent();
+    buyTeam(createStudent().id, 12000, 3, [a.id, base.instructor.id]);
+
+    const { sales } = getCourseAnalytics(base.course.id, base.instructor.id);
+
+    expect(sales.teamSeatsSold).toBe(3);
+    expect(sales.teamSeatsRedeemed).toBe(1);
+  });
+
   it("breaks revenue and purchase count down by buyer country, highest revenue first", () => {
     buy(base.user.id, 2000, "IN");
     buy(createStudent().id, 2500, "IN");

@@ -1,20 +1,15 @@
-import { useState } from "react";
 import type {
   QuizAnalytics,
   QuizAttemptMode,
 } from "~/services/courseAnalyticsService";
 import { Button } from "~/components/ui/button";
-import { SectionCard, SectionEmpty, StatTile, formatPercent } from "./shared";
+import { QUIZ_MODE_LABELS, SectionCard, SectionEmpty, formatPercent } from "./shared";
 
 // ─── Quizzes section ───
-// Quiz pass rate, per-quiz table and hardest questions. Both attempt modes
-// arrive precomputed; the first/best toggle lives in component state only,
-// so it defaults to "first" on every load and never triggers a request.
-
-const MODE_LABELS: Record<QuizAttemptMode, string> = {
-  first: "First attempt",
-  best: "Best attempt",
-};
+// Per-quiz table and hardest questions. Both attempt modes arrive
+// precomputed; the first/best toggle shown here is page component state (it
+// also drives the headline quiz pass rate), so it defaults to "first" on
+// every load and never triggers a request.
 
 const thClass =
   "px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground";
@@ -28,7 +23,7 @@ function AttemptToggle({
 }) {
   return (
     <div role="group" aria-label="Quiz attempts" className="flex gap-1 rounded-md border p-1">
-      {(Object.keys(MODE_LABELS) as QuizAttemptMode[]).map((value) => (
+      {(Object.keys(QUIZ_MODE_LABELS) as QuizAttemptMode[]).map((value) => (
         <Button
           key={value}
           type="button"
@@ -37,23 +32,30 @@ function AttemptToggle({
           aria-pressed={mode === value}
           onClick={() => onChange(value)}
         >
-          {MODE_LABELS[value]}
+          {QUIZ_MODE_LABELS[value]}
         </Button>
       ))}
     </div>
   );
 }
 
-export function QuizzesSection({ quizzes }: { quizzes: QuizAnalytics }) {
-  const [mode, setMode] = useState<QuizAttemptMode>("first");
+export function QuizzesSection({
+  quizzes,
+  mode,
+  onModeChange,
+}: {
+  quizzes: QuizAnalytics;
+  mode: QuizAttemptMode;
+  onModeChange: (mode: QuizAttemptMode) => void;
+}) {
   const figures = quizzes[mode];
   const hasQuizzes = figures.quizzes.length > 0;
 
   return (
     <SectionCard
       title="Quizzes"
-      description={`All time · ${MODE_LABELS[mode].toLowerCase()} per student per quiz`}
-      action={hasQuizzes ? <AttemptToggle mode={mode} onChange={setMode} /> : undefined}
+      description={`All time · ${QUIZ_MODE_LABELS[mode].toLowerCase()} per student per quiz`}
+      action={hasQuizzes ? <AttemptToggle mode={mode} onChange={onModeChange} /> : undefined}
     >
       {!hasQuizzes ? (
         <SectionEmpty
@@ -67,14 +69,6 @@ export function QuizzesSection({ quizzes }: { quizzes: QuizAnalytics }) {
         />
       ) : (
         <div className="space-y-6">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <StatTile
-              label="Quiz pass rate (all time)"
-              value={formatPercent(figures.passRate)}
-              hint={MODE_LABELS[mode]}
-            />
-          </div>
-
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>

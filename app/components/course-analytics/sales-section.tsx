@@ -4,9 +4,9 @@ import { formatCents } from "~/lib/utils";
 import { SectionCard, SectionEmpty, StatTile } from "./shared";
 
 // ─── Sales section ───
-// All-time revenue, purchases and average price per seat, team seats sold vs.
-// redeemed, and revenue by buyer country. Free courses show a message instead.
-// The revenue trend line lives in the trends section.
+// Team seats sold vs. redeemed and revenue by buyer country. Free courses show
+// a message instead. Total revenue, purchases and average price paid live in
+// the headline section; the revenue trend line lives in the trends section.
 
 const countryNames = new Map(COUNTRIES.map(({ code, name }) => [code, name]));
 
@@ -30,12 +30,12 @@ export function SalesSection({
     );
   }
 
-  if (sales.purchases === 0 || sales.averagePrice === null) {
+  if (sales.purchases === 0) {
     return (
       <SectionCard title="Sales" description="All time">
         <SectionEmpty
           title="No sales yet"
-          body="Revenue and purchases appear here once someone buys the course."
+          body="Team seats and revenue by country appear here once someone buys the course."
         />
       </SectionCard>
     );
@@ -44,19 +44,6 @@ export function SalesSection({
   return (
     <SectionCard title="Sales" description="All time">
       <div className="space-y-6">
-        <div className="grid gap-4 sm:grid-cols-3">
-          <StatTile label="Total revenue (all time)" value={formatCents(sales.revenue)} />
-          <StatTile
-            label="Purchases (all time)"
-            value={sales.purchases.toLocaleString()}
-          />
-          <StatTile
-            label="Average price per seat (all time)"
-            value={formatCents(Math.round(sales.averagePrice))}
-            hint={`${sales.seats.toLocaleString()} seats paid for`}
-          />
-        </div>
-
         <div className="grid gap-4 sm:grid-cols-2">
           <StatTile
             label="Team seats sold"

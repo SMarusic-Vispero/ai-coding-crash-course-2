@@ -11,6 +11,7 @@ import { AlertTriangle, BarChart3, BookOpen, GraduationCap, Plus, Users } from "
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
 import { CourseStatus, UserRole } from "~/db/schema";
+import { hasCourseAnalytics } from "~/lib/courseAnalyticsAccess";
 
 export function meta() {
   return [
@@ -213,7 +214,7 @@ export default function InstructorDashboard({
                     Edit Course
                   </Button>
                 </Link>
-                {course.status !== CourseStatus.Draft && (
+                {hasCourseAnalytics(course.status) && (
                   <Link to={`/instructor/${course.id}/analytics`} className="flex-1">
                     <Button className="w-full" variant="outline">
                       <BarChart3 className="mr-2 size-4" />

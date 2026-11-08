@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
+import type { QuizAttemptMode } from "~/services/courseAnalyticsService";
 
 // ─── Course analytics: shared pieces ───
 // Building blocks reused by every section of /instructor/:courseId/analytics.
@@ -65,3 +66,14 @@ export function SectionEmpty({ title, body }: { title: string; body?: string }) 
 export function formatPercent(fraction: number): string {
   return `${Math.round(fraction * 100)}%`;
 }
+
+/** Formats an average rating to one decimal place, e.g. "4.3". */
+export function formatRating(average: number): string {
+  return average.toFixed(1);
+}
+
+/** Labels for the page-wide first/best quiz attempt toggle. */
+export const QUIZ_MODE_LABELS: Record<QuizAttemptMode, string> = {
+  first: "First attempt",
+  best: "Best attempt",
+};

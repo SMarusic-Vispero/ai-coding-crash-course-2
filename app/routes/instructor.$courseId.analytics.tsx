@@ -1,13 +1,16 @@
+import { useState } from "react";
 import { Link, data, isRouteErrorResponse } from "react-router";
 import type { Route } from "./+types/instructor.$courseId.analytics";
 import { getCourseById } from "~/services/courseService";
-import { getUserById } from "~/services/userService";
-import { getCourseAnalytics } from "~/services/courseAnalyticsService";
-import { getCurrentUserId } from "~/lib/session";
-import { CourseStatus, UserRole } from "~/db/schema";
+import {
+  getCourseAnalytics,
+  type QuizAttemptMode,
+} from "~/services/courseAnalyticsService";
+import { requireInstructorOrAdmin } from "~/lib/access.server";
+import { hasCourseAnalytics } from "~/lib/courseAnalyticsAccess";
 import { Button } from "~/components/ui/button";
 import { AlertTriangle, ArrowLeft } from "lucide-react";
-import { StudentsSection } from "~/components/course-analytics/students-section";
+import { HeadlineSection } from "~/components/course-analytics/headline-section";
 import { TrendsSection } from "~/components/course-analytics/trends-section";
 import { QuizzesSection } from "~/components/course-analytics/quizzes-section";
 import { ProgressSection } from "~/components/course-analytics/progress-section";
@@ -23,21 +26,9 @@ export function meta({ loaderData }: Route.MetaArgs) {
 }
 
 export async function loader({ params, request }: Route.LoaderArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel to view course analytics.", {
-      status: 401,
-    });
-  }
-
-  const user = getUserById(currentUserId);
-
-  if (!user || user.role !== UserRole.Instructor) {
-    throw data("Only instructors can access course analytics.", {
-      status: 403,
-    });
-  }
+  // 401 when signed out, 403 for non-instructors. Admins pass this guard but
+  // are then refused by the ownership check: the page is owner-only.
+  const { userId } = await requireInstructorOrAdmin(request);
 
   const courseId = parseInt(params.courseId, 10);
   if (isNaN(courseId)) {
@@ -50,13 +41,13 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Course not found.", { status: 404 });
   }
 
-  if (course.instructorId !== currentUserId) {
+  if (course.instructorId !== userId) {
     throw data("You can only view analytics for your own courses.", {
       status: 403,
     });
   }
 
-  if (course.status === CourseStatus.Draft) {
+  if (!hasCourseAnalytics(course.status)) {
     throw data("Analytics are available once the course is published", {
       status: 404,
     });
@@ -69,12 +60,15 @@ export async function loader({ params, request }: Route.LoaderArgs) {
       status: course.status,
       price: course.price,
     },
-    analytics: getCourseAnalytics(course.id, currentUserId),
+    analytics: getCourseAnalytics(course.id, userId),
   };
 }
 
 export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps) {
   const { course, analytics } = loaderData;
+  const isFree = course.price === 0;
+  // Page state only (no URL): every quiz figure follows this one toggle.
+  const [quizMode, setQuizMode] = useState<QuizAttemptMode>("first");
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-6 lg:p-8">
@@ -90,38 +84,40 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
         <p className="mt-1 text-muted-foreground">{course.title}</p>
       </div>
 
-      {/* One component per section; later sections slot in below. */}
-      <StudentsSection students={analytics.students} feedback={analytics.feedback} />
+      <HeadlineSection
+        students={analytics.students}
+        feedback={analytics.feedback}
+        quizMode={quizMode}
+        quizzes={analytics.quizzes[quizMode]}
+        sales={analytics.sales}
+        isFree={isFree}
+      />
       <TrendsSection trends={analytics.trends} />
-      <QuizzesSection quizzes={analytics.quizzes} />
+      <QuizzesSection
+        quizzes={analytics.quizzes}
+        mode={quizMode}
+        onModeChange={setQuizMode}
+      />
       <ProgressSection progress={analytics.progress} />
       <FeedbackSection feedback={analytics.feedback} />
-      <SalesSection sales={analytics.sales} isFree={course.price === 0} />
+      <SalesSection sales={analytics.sales} isFree={isFree} />
     </div>
   );
 }
+
+const ERROR_TITLES: Record<number, string> = {
+  401: "Sign in required",
+  403: "Access denied",
+  404: "Not found",
+};
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   let title = "Something went wrong";
   let message = "An unexpected error occurred while loading course analytics.";
 
   if (isRouteErrorResponse(error)) {
-    if (error.status === 404) {
-      title = "Not found";
-      message =
-        typeof error.data === "string"
-          ? error.data
-          : "The course you're looking for doesn't exist or may have been removed.";
-    } else if (error.status === 401) {
-      title = "Sign in required";
-      message = typeof error.data === "string" ? error.data : "Please select a user from the DevUI panel.";
-    } else if (error.status === 403) {
-      title = "Access denied";
-      message = typeof error.data === "string" ? error.data : "You don't have permission to view these analytics.";
-    } else {
-      title = `Error ${error.status}`;
-      message = typeof error.data === "string" ? error.data : error.statusText;
-    }
+    title = ERROR_TITLES[error.status] ?? `Error ${error.status}`;
+    message = typeof error.data === "string" ? error.data : error.statusText || message;
   }
 
   return (

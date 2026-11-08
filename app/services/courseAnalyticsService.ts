@@ -1,4 +1,5 @@
-import { and, asc, desc, eq, isNotNull, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, sql, type SQL } from "drizzle-orm";
+import type { SQLiteColumn, SQLiteSelect, SQLiteTable } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
   comments,
@@ -26,10 +27,51 @@ import {
 // ─── Course Analytics Service ───
 // Per-course analytics for the course's own instructor
 // (/instructor/:courseId/analytics). One entry point returns the whole page
-// payload; each section is computed by its own function so later sections
-// (trends, sales, progress, quizzes, feedback) are added as new keys.
+// payload; each section is computed by its own function under its own key.
 // Every query excludes the instructor's own rows.
 // Uses positional parameters (project convention).
+
+// ─── Shared queries ───
+
+/** Course order: module position, then lesson position, then lesson id. */
+const LESSON_ORDER = [asc(modules.position), asc(lessons.position), asc(lessons.id)];
+
+/**
+ * Narrows a dynamic select over `lessons` to the course's lessons, joined to
+ * their modules and in course order. Callers add their own fields, extra joins
+ * and grouping.
+ */
+function inCourseLessons<T extends SQLiteSelect>(query: T, courseId: number) {
+  return query
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(modules.courseId, courseId))
+    .orderBy(...LESSON_ORDER);
+}
+
+/** A per-UTC-day total: a count, or cents for revenue. */
+interface DayTotal {
+  day: string;
+  total: number;
+}
+
+/**
+ * Sums `value` per UTC day of `dateColumn` over the rows of `table` matching
+ * `where`. Rows with no date are skipped.
+ */
+function getTotalsPerDay(
+  table: SQLiteTable,
+  dateColumn: SQLiteColumn,
+  value: SQL<number>,
+  where: SQL | undefined
+): DayTotal[] {
+  const day = sql<string>`substr(${dateColumn}, 1, 10)`;
+  return db
+    .select({ day, total: value })
+    .from(table)
+    .where(and(isNotNull(dateColumn), where))
+    .groupBy(day)
+    .all();
+}
 
 // ─── Students ───
 
@@ -160,7 +202,7 @@ function getQuizModeFigures(
     .leftJoin(selected, and(eq(selected.quizId, quizzes.id), eq(selected.rank, 1)))
     .where(eq(modules.courseId, courseId))
     .groupBy(quizzes.id)
-    .orderBy(asc(modules.position), asc(lessons.position), asc(lessons.id), asc(quizzes.id))
+    .orderBy(...LESSON_ORDER, asc(quizzes.id))
     .all();
 
   const correctRate = sql<number>`cast(sum(${quizOptions.isCorrect}) as real) / count(*)`;
@@ -184,9 +226,7 @@ function getQuizModeFigures(
     .groupBy(quizQuestions.id)
     .orderBy(
       asc(correctRate),
-      asc(modules.position),
-      asc(lessons.position),
-      asc(lessons.id),
+      ...LESSON_ORDER,
       asc(quizzes.id),
       asc(quizQuestions.position),
       asc(quizQuestions.id)
@@ -232,79 +272,64 @@ export interface CourseTrends {
   daily: DailyActivity[];
 }
 
-interface DayCount {
-  day: string;
-  count: number;
+const COUNT_ROWS = sql<number>`count(*)`;
+
+function getEnrollmentsPerDay(courseId: number, instructorId: number): DayTotal[] {
+  return getTotalsPerDay(
+    enrollments,
+    enrollments.enrolledAt,
+    COUNT_ROWS,
+    and(eq(enrollments.courseId, courseId), ne(enrollments.userId, instructorId))
+  );
 }
 
-function getEnrollmentsPerDay(courseId: number, instructorId: number): DayCount[] {
-  const day = sql<string>`substr(${enrollments.enrolledAt}, 1, 10)`;
-  return db
-    .select({ day, count: sql<number>`count(*)` })
-    .from(enrollments)
-    .where(and(eq(enrollments.courseId, courseId), ne(enrollments.userId, instructorId)))
-    .groupBy(day)
-    .all();
+function getCompletionsPerDay(courseId: number, instructorId: number): DayTotal[] {
+  return getTotalsPerDay(
+    enrollments,
+    enrollments.completedAt,
+    COUNT_ROWS,
+    and(eq(enrollments.courseId, courseId), ne(enrollments.userId, instructorId))
+  );
 }
 
-function getCompletionsPerDay(courseId: number, instructorId: number): DayCount[] {
-  const day = sql<string>`substr(${enrollments.completedAt}, 1, 10)`;
-  return db
-    .select({ day, count: sql<number>`count(*)` })
-    .from(enrollments)
-    .where(
-      and(
-        eq(enrollments.courseId, courseId),
-        ne(enrollments.userId, instructorId),
-        isNotNull(enrollments.completedAt)
-      )
+function getLessonsCompletedPerDay(courseId: number, instructorId: number): DayTotal[] {
+  return getTotalsPerDay(
+    lessonProgress,
+    lessonProgress.completedAt,
+    COUNT_ROWS,
+    and(
+      inArray(
+        lessonProgress.lessonId,
+        inCourseLessons(db.select({ id: lessons.id }).from(lessons).$dynamic(), courseId)
+      ),
+      ne(lessonProgress.userId, instructorId),
+      eq(lessonProgress.status, LessonProgressStatus.Completed)
     )
-    .groupBy(day)
-    .all();
-}
-
-function getLessonsCompletedPerDay(courseId: number, instructorId: number): DayCount[] {
-  const day = sql<string>`substr(${lessonProgress.completedAt}, 1, 10)`;
-  return db
-    .select({ day, count: sql<number>`count(*)` })
-    .from(lessonProgress)
-    .innerJoin(lessons, eq(lessons.id, lessonProgress.lessonId))
-    .innerJoin(modules, eq(modules.id, lessons.moduleId))
-    .where(
-      and(
-        eq(modules.courseId, courseId),
-        ne(lessonProgress.userId, instructorId),
-        eq(lessonProgress.status, LessonProgressStatus.Completed),
-        isNotNull(lessonProgress.completedAt)
-      )
-    )
-    .groupBy(day)
-    .all();
+  );
 }
 
 /** Amount paid (cents) summed per UTC purchase day. */
-function getRevenuePerDay(courseId: number, instructorId: number): DayCount[] {
-  const day = sql<string>`substr(${purchases.createdAt}, 1, 10)`;
-  return db
-    .select({ day, count: sql<number>`sum(${purchases.amountPaid})` })
-    .from(purchases)
-    .where(and(eq(purchases.courseId, courseId), ne(purchases.userId, instructorId)))
-    .groupBy(day)
-    .all();
+function getRevenuePerDay(courseId: number, instructorId: number): DayTotal[] {
+  return getTotalsPerDay(
+    purchases,
+    purchases.createdAt,
+    sql<number>`sum(${purchases.amountPaid})`,
+    and(eq(purchases.courseId, courseId), ne(purchases.userId, instructorId))
+  );
 }
 
 /** Merges per-key day totals into one row per active day, sorted by date. */
-function mergeDaily(perKey: Record<TrendKey, DayCount[]>): DailyActivity[] {
+function mergeDaily(perKey: Record<TrendKey, DayTotal[]>): DailyActivity[] {
   const byDay = new Map<string, DailyActivity>();
   for (const key of TREND_KEYS) {
-    for (const { day, count } of perKey[key]) {
+    for (const { day, total } of perKey[key]) {
       let row = byDay.get(day);
       if (!row) {
         row = { date: day } as DailyActivity;
         for (const k of TREND_KEYS) row[k] = 0;
         byDay.set(day, row);
       }
-      row[key] += count;
+      row[key] += total;
     }
   }
   return [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
@@ -346,15 +371,18 @@ export interface CourseProgress {
 }
 
 function getProgress(courseId: number, instructorId: number): CourseProgress {
-  const rows = db
-    .select({
-      lessonId: lessons.id,
-      lessonTitle: lessons.title,
-      moduleTitle: modules.title,
-      completed: sql<number>`count(${lessonProgress.id})`,
-    })
-    .from(lessons)
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+  const rows = inCourseLessons(
+    db
+      .select({
+        lessonId: lessons.id,
+        lessonTitle: lessons.title,
+        moduleTitle: modules.title,
+        completed: sql<number>`count(${lessonProgress.id})`,
+      })
+      .from(lessons)
+      .$dynamic(),
+    courseId
+  )
     .leftJoin(
       lessonProgress,
       and(
@@ -363,9 +391,7 @@ function getProgress(courseId: number, instructorId: number): CourseProgress {
         ne(lessonProgress.userId, instructorId)
       )
     )
-    .where(eq(modules.courseId, courseId))
     .groupBy(lessons.id)
-    .orderBy(asc(modules.position), asc(lessons.position), asc(lessons.id))
     .all();
 
   return { lessons: rows };
@@ -399,15 +425,18 @@ export interface LessonComments {
 const STAR_VALUES = [1, 2, 3, 4, 5];
 
 function getCommentsPerLesson(courseId: number, instructorId: number): LessonComments[] {
-  return db
-    .select({
-      lessonId: lessons.id,
-      lessonTitle: lessons.title,
-      moduleTitle: modules.title,
-      comments: sql<number>`count(${comments.id})`,
-    })
-    .from(lessons)
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+  return inCourseLessons(
+    db
+      .select({
+        lessonId: lessons.id,
+        lessonTitle: lessons.title,
+        moduleTitle: modules.title,
+        comments: sql<number>`count(${comments.id})`,
+      })
+      .from(lessons)
+      .$dynamic(),
+    courseId
+  )
     .leftJoin(
       comments,
       and(
@@ -416,9 +445,7 @@ function getCommentsPerLesson(courseId: number, instructorId: number): LessonCom
         ne(comments.userId, instructorId)
       )
     )
-    .where(eq(modules.courseId, courseId))
     .groupBy(lessons.id)
-    .orderBy(asc(modules.position), asc(lessons.position), asc(lessons.id))
     .all();
 }
 
@@ -459,7 +486,7 @@ export interface SalesAnalytics {
   averagePrice: number | null;
   /** Coupons created by team purchases. */
   teamSeatsSold: number;
-  /** Of those, coupons with a redeeming user. */
+  /** Of those, coupons redeemed by someone other than the instructor. */
   teamSeatsRedeemed: number;
   /** Revenue and purchases per buyer country, highest revenue first. */
   byCountry: CountrySales[];
@@ -493,7 +520,9 @@ function getSales(courseId: number, instructorId: number): SalesAnalytics {
       .select({
         purchaseId: sql<number>`${coupons.purchaseId}`.as("coupon_purchase_id"),
         seats: sql<number>`count(*)`.as("coupon_seats"),
-        redeemed: sql<number>`count(${coupons.redeemedByUserId})`.as("coupon_redeemed"),
+        redeemed: sql<number>`sum(case when ${coupons.redeemedByUserId} is not null and ${coupons.redeemedByUserId} <> ${instructorId} then 1 else 0 end)`.as(
+          "coupon_redeemed"
+        ),
       })
       .from(coupons)
       .groupBy(coupons.purchaseId)

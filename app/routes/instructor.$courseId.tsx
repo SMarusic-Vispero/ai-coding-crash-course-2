@@ -39,6 +39,7 @@ import { getQuizByLessonId, getBestAttempt } from "~/services/quizService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
 import { CourseStatus, UserRole } from "~/db/schema";
+import { hasCourseAnalytics } from "~/lib/courseAnalyticsAccess";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { MonacoMarkdownEditor } from "~/components/monaco-markdown-editor";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
@@ -1180,24 +1181,24 @@ export default function InstructorCourseEditor({
       <Tabs defaultValue="content">
         <div className="flex flex-wrap items-center gap-2">
           <TabsList>
-          <TabsTrigger value="content">
-            <BookOpen className="size-4" />
-            Content
-          </TabsTrigger>
-          <TabsTrigger value="settings">
-            <Settings className="size-4" />
-            Settings
-          </TabsTrigger>
-          <TabsTrigger value="sales-copy">
-            <FileText className="size-4" />
-            Sales Copy
-          </TabsTrigger>
-          <TabsTrigger value="students">
-            <Users className="size-4" />
-            Students
-          </TabsTrigger>
+            <TabsTrigger value="content">
+              <BookOpen className="size-4" />
+              Content
+            </TabsTrigger>
+            <TabsTrigger value="settings">
+              <Settings className="size-4" />
+              Settings
+            </TabsTrigger>
+            <TabsTrigger value="sales-copy">
+              <FileText className="size-4" />
+              Sales Copy
+            </TabsTrigger>
+            <TabsTrigger value="students">
+              <Users className="size-4" />
+              Students
+            </TabsTrigger>
           </TabsList>
-          {course.status !== CourseStatus.Draft && (
+          {hasCourseAnalytics(course.status) && (
             <Button asChild variant="ghost" size="sm">
               <Link to={`/instructor/${course.id}/analytics`}>
                 <BarChart3 className="size-4" />
