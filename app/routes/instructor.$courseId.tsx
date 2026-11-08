@@ -69,6 +69,7 @@ import {
   Award,
   Globe,
   FileText,
+  BarChart3,
 } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
@@ -1177,7 +1178,8 @@ export default function InstructorCourseEditor({
 
       {/* Tabs */}
       <Tabs defaultValue="content">
-        <TabsList>
+        <div className="flex flex-wrap items-center gap-2">
+          <TabsList>
           <TabsTrigger value="content">
             <BookOpen className="size-4" />
             Content
@@ -1194,7 +1196,16 @@ export default function InstructorCourseEditor({
             <Users className="size-4" />
             Students
           </TabsTrigger>
-        </TabsList>
+          </TabsList>
+          {course.status !== CourseStatus.Draft && (
+            <Button asChild variant="ghost" size="sm">
+              <Link to={`/instructor/${course.id}/analytics`}>
+                <BarChart3 className="size-4" />
+                Analytics
+              </Link>
+            </Button>
+          )}
+        </div>
 
         {/* Content Tab */}
         <TabsContent value="content" className="mt-6">
